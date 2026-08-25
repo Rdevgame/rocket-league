@@ -1,5 +1,5 @@
 /**
- * 3D Game Client - Three.js Renderer
+ * Enhanced 3D Game Client with all features
  */
 class RocketLeagueGame {
   constructor() {
@@ -7,6 +7,10 @@ class RocketLeagueGame {
     this.camera = null;
     this.renderer = null;
     this.socket = null;
+    this.gamepadController = null;
+    this.inputSmoother = null;
+    this.particleSystem = null;
+    this.replaySystem = null;
     
     this.gameState = {
       ball: { position: { x: 0, y: 0.2, z: 0 } },
@@ -18,7 +22,9 @@ class RocketLeagueGame {
     this.meshes = {
       ball: null,
       cars: {},
-      arena: null
+      particles: [],
+      arena: null,
+      trails: {}
     };
     
     this.playerInputs = {
@@ -29,6 +35,13 @@ class RocketLeagueGame {
       handbrake: false
     };
     
+    this.stats = {
+      goals: 0,
+      saves: 0,
+      assists: 0,
+      boost_usage: 0
+    };
+    
     this.init();
   }
 
@@ -36,12 +49,13 @@ class RocketLeagueGame {
    * Initialize game
    */
   async init() {
-    // Setup Three.js
     this.setupScene();
     this.setupLights();
     this.createArena();
     this.createBall();
     this.setupControls();
+    this.gamepadController = new GamepadController();
+    this.inputSmoother = new InputSmoother(0.15);
     this.connectSocket();
     this.animate();
   }
@@ -52,12 +66,10 @@ class RocketLeagueGame {
   setupScene() {
     const canvas = document.getElementById('canvas');
     
-    // Scene
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0x1a1a2e);
     this.scene.fog = new THREE.Fog(0x1a1a2e, 500, 1000);
     
-    // Camera
     this.camera = new THREE.PerspectiveCamera(
       75,
       window.innerWidth / window.innerHeight,
@@ -67,11 +79,11 @@ class RocketLeagueGame {
     this.camera.position.set(0, 30, 60);
     this.camera.lookAt(0, 0, 0);
     
-    // Renderer
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
     this.renderer.setSize(window.innerWidth, window.innerHeight);
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowShadowMap;
+    this.renderer.setPixelRatio(window.devicePixelRatio);
     
     window.addEventListener('resize', () => this.onWindowResize());
   }
@@ -80,11 +92,9 @@ class RocketLeagueGame {
    * Setup lighting
    */
   setupLights() {
-    // Ambient light
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
     this.scene.add(ambientLight);
     
-    // Directional light (sun)
     const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
     directionalLight.position.set(100, 100, 50);
     directionalLight.castShadow = true;
@@ -93,12 +103,11 @@ class RocketLeagueGame {
     directionalLight.shadow.camera.far = 500;
     this.scene.add(directionalLight);
     
-    // Point light (goal glow)
-    const blueGoalLight = new THREE.PointLight(0x00d4ff, 0.5);
+    const blueGoalLight = new THREE.PointLight(0x00d4ff, 0.7);
     blueGoalLight.position.set(0, 10, -52);
     this.scene.add(blueGoalLight);
     
-    const orangeGoalLight = new THREE.PointLight(0xff6600, 0.5);
+    const orangeGoalLight = new THREE.PointLight(0xff6600, 0.7);
     orangeGoalLight.position.set(0, 10, 52);
     this.scene.add(orangeGoalLight);
   }
@@ -107,15 +116,38 @@ class RocketLeagueGame {
    * Create arena
    */
   createArena() {
-    // Field dimensions
     const width = 68;
     const length = 104;
     const height = 100;
     
-    // Ground
+    // Ground with grid pattern
     const groundGeometry = new THREE.PlaneGeometry(width, length);
+    const canvas = document.createElement('canvas');
+    canvas.width = 512;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1a4d2e';
+    ctx.fillRect(0, 0, 512, 512);
+    ctx.strokeStyle = '#2a6d4e';
+    ctx.lineWidth = 2;
+    for (let i = 0; i < 512; i += 32) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i, 512);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(0, i);
+      ctx.lineTo(512, i);
+      ctx.stroke();
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas);
+    texture.repeat.set(4, 4);
+    texture.wrapS = THREE.RepeatWrapping;
+    texture.wrapT = THREE.RepeatWrapping;
+    
     const groundMaterial = new THREE.MeshStandardMaterial({
-      color: 0x1a4d2e,
+      map: texture,
       roughness: 0.7,
       metalness: 0.3
     });
@@ -124,7 +156,7 @@ class RocketLeagueGame {
     ground.receiveShadow = true;
     this.scene.add(ground);
     
-    // Side walls (left and right)
+    // Walls
     const wallMaterial = new THREE.MeshStandardMaterial({
       color: 0x2a2a3e,
       roughness: 0.8,
@@ -149,8 +181,8 @@ class RocketLeagueGame {
     rightWall.castShadow = true;
     this.scene.add(rightWall);
     
-    // Goal zones
-    const goalMaterial = new THREE.MeshStandardMaterial({
+    // Goal zones with glow
+    const blueGoalMaterial = new THREE.MeshStandardMaterial({
       color: 0x00d4ff,
       roughness: 0.5,
       metalness: 0.5,
@@ -159,7 +191,7 @@ class RocketLeagueGame {
     
     const blueGoal = new THREE.Mesh(
       new THREE.BoxGeometry(17.5, 6.25, 7.5),
-      goalMaterial
+      blueGoalMaterial
     );
     blueGoal.position.set(0, 3, -52);
     this.scene.add(blueGoal);
@@ -186,8 +218,6 @@ class RocketLeagueGame {
     ceiling.rotation.x = Math.PI / 2;
     ceiling.position.y = height;
     this.scene.add(ceiling);
-    
-    this.meshes.arena = { ground, leftWall, rightWall, blueGoal, orangeGoal, ceiling };
   }
 
   /**
@@ -209,10 +239,10 @@ class RocketLeagueGame {
   }
 
   /**
-   * Create or update car mesh
+   * Create car
    */
   createCar(carState) {
-    if (this.meshes.cars[carState.id]) return; // Already exists
+    if (this.meshes.cars[carState.id]) return;
     
     const carGeometry = new THREE.BoxGeometry(2, 1.3, 4.5);
     const teamColor = carState.team === 0 ? 0x00d4ff : 0xff6600;
@@ -227,11 +257,13 @@ class RocketLeagueGame {
     car.receiveShadow = true;
     this.scene.add(car);
     
+    // Create boost trail emitter
+    this.meshes.trails[carState.id] = { particles: [] };
     this.meshes.cars[carState.id] = car;
   }
 
   /**
-   * Update car positions
+   * Update cars
    */
   updateCars(carsState) {
     for (let carState of carsState) {
@@ -242,7 +274,28 @@ class RocketLeagueGame {
       const mesh = this.meshes.cars[carState.id];
       mesh.position.set(carState.position.x, carState.position.y, carState.position.z);
       mesh.quaternion.set(carState.rotation.x, carState.rotation.y, carState.rotation.z, carState.rotation.w);
+      
+      // Emit boost particles if boosting
+      if (carState.boost < 100 && this.socket.id === carState.id) {
+        this.addBoostTrail(carState);
+      }
     }
+  }
+
+  /**
+   * Add boost trail
+   */
+  addBoostTrail(carState) {
+    const particle = new THREE.Mesh(
+      new THREE.SphereGeometry(0.3, 8, 8),
+      new THREE.MeshBasicMaterial({ color: 0x00d4ff, transparent: true, opacity: 0.6 })
+    );
+    particle.position.set(carState.position.x, carState.position.y - 0.5, carState.position.z);
+    particle.velocity = new THREE.Vector3(0, -1, 0);
+    particle.lifetime = 0.5;
+    particle.maxLifetime = 0.5;
+    this.scene.add(particle);
+    this.meshes.particles.push(particle);
   }
 
   /**
@@ -253,7 +306,6 @@ class RocketLeagueGame {
     
     window.addEventListener('keydown', (e) => {
       keys[e.key.toLowerCase()] = true;
-      
       if (e.key === ' ') {
         this.playerInputs.jump = true;
         e.preventDefault();
@@ -262,48 +314,51 @@ class RocketLeagueGame {
     
     window.addEventListener('keyup', (e) => {
       keys[e.key.toLowerCase()] = false;
-      
       if (e.key === ' ') {
         this.playerInputs.jump = false;
         e.preventDefault();
       }
     });
     
-    // Input loop
+    // Input update loop
     setInterval(() => {
-      // Throttle
-      if (keys['arrowup'] || keys['w']) {
-        this.playerInputs.throttle = Math.min(1, this.playerInputs.throttle + 0.1);
-      } else if (keys['arrowdown'] || keys['s']) {
-        this.playerInputs.throttle = Math.max(-1, this.playerInputs.throttle - 0.1);
-      } else {
-        this.playerInputs.throttle *= 0.9;
+      let input = {
+        throttle: 0,
+        steer: 0,
+        boost: false,
+        jump: false,
+        handbrake: false
+      };
+      
+      // Keyboard input
+      if (keys['arrowup'] || keys['w']) input.throttle = 1;
+      if (keys['arrowdown'] || keys['s']) input.throttle = -1;
+      if (keys['arrowleft'] || keys['a']) input.steer = 1;
+      if (keys['arrowright'] || keys['d']) input.steer = -1;
+      if (keys['shift']) input.boost = true;
+      if (keys['control']) input.handbrake = true;
+      
+      // Gamepad input
+      const gamepadInput = this.gamepadController?.getInput();
+      if (gamepadInput) {
+        input.throttle = gamepadInput.throttle || input.throttle;
+        input.steer = gamepadInput.steer || input.steer;
+        input.boost = gamepadInput.boost || input.boost;
+        input.jump = gamepadInput.jump || input.jump;
+        input.handbrake = gamepadInput.handbrake || input.handbrake;
       }
       
-      // Steering
-      if (keys['arrowleft'] || keys['a']) {
-        this.playerInputs.steer = Math.min(1, this.playerInputs.steer + 0.1);
-      } else if (keys['arrowright'] || keys['d']) {
-        this.playerInputs.steer = Math.max(-1, this.playerInputs.steer - 0.1);
-      } else {
-        this.playerInputs.steer *= 0.9;
-      }
+      // Smooth input
+      input = this.inputSmoother.smoothInput(input);
       
-      // Boost
-      this.playerInputs.boost = keys['shift'];
-      
-      // Handbrake
-      this.playerInputs.handbrake = keys['control'];
-      
-      // Send to server
       if (this.socket) {
-        this.socket.emit('player-input', this.playerInputs);
+        this.socket.emit('player-input', input);
       }
-    }, 16); // ~60 FPS
+    }, 16);
   }
 
   /**
-   * Connect to server via Socket.IO
+   * Connect to server
    */
   connectSocket() {
     this.socket = io();
@@ -314,21 +369,12 @@ class RocketLeagueGame {
       document.getElementById('loading').style.display = 'none';
     });
     
-    this.socket.on('game-state', (state) => {
-      this.gameState = state;
-    });
-    
     this.socket.on('game-update', (state) => {
       this.gameState = state;
-      
-      // Update ball
       this.meshes.ball.position.set(state.ball.position.x, state.ball.position.y, state.ball.position.z);
-      
-      // Update cars
       this.updateCars(state.cars);
-      
-      // Update HUD
       this.updateHUD(state);
+      this.updateParticles();
     });
     
     this.socket.on('disconnect', () => {
@@ -337,7 +383,7 @@ class RocketLeagueGame {
   }
 
   /**
-   * Update HUD display
+   * Update HUD
    */
   updateHUD(state) {
     document.getElementById('blueScore').textContent = state.score.team0;
@@ -346,10 +392,9 @@ class RocketLeagueGame {
     const minutes = Math.floor(state.gameTime / 60);
     const seconds = Math.floor(state.gameTime % 60);
     document.getElementById('timeDisplay').textContent = 
-      `${5 - minutes}:${(59 - seconds).toString().padStart(2, '0')}`;
+      `${(5 - minutes)}:${(59 - seconds).toString().padStart(2, '0')}`;
     
-    // Find player's car
-    const playerCar = state.cars.find(c => this.socket.id === c.id);
+    const playerCar = state.cars.find(c => this.socket && this.socket.id === c.id);
     if (playerCar) {
       const boost = Math.round(playerCar.boost);
       document.getElementById('boostPercent').textContent = boost;
@@ -364,12 +409,29 @@ class RocketLeagueGame {
   }
 
   /**
+   * Update particles
+   */
+  updateParticles() {
+    for (let i = this.meshes.particles.length - 1; i >= 0; i--) {
+      const particle = this.meshes.particles[i];
+      particle.lifetime -= 1 / 60;
+      
+      if (particle.lifetime <= 0) {
+        this.scene.remove(particle);
+        this.meshes.particles.splice(i, 1);
+      } else {
+        particle.position.add(particle.velocity);
+        particle.material.opacity = particle.lifetime / particle.maxLifetime;
+      }
+    }
+  }
+
+  /**
    * Animation loop
    */
   animate() {
     requestAnimationFrame(() => this.animate());
     
-    // Simple camera follow
     const playerCar = this.gameState.cars.find(c => this.socket && this.socket.id === c.id);
     if (playerCar) {
       const targetPos = new THREE.Vector3(
@@ -390,14 +452,12 @@ class RocketLeagueGame {
   onWindowResize() {
     const width = window.innerWidth;
     const height = window.innerHeight;
-    
     this.camera.aspect = width / height;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(width, height);
   }
 }
 
-// Start game when page loads
 window.addEventListener('DOMContentLoaded', () => {
   new RocketLeagueGame();
 });
